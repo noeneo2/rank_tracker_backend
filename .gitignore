@@ -108,3 +108,6 @@ venv.bak/
 
 # Google Cloud credentials
 neo-rank-tracker-63b755f3c88a.json
+
+# Environment variables (secrets)
+.env
