@@ -12,7 +12,8 @@ uuid
 httpx
 PyJWT
 passlib
-bcrypt
+bcrypt==4.0.1
 asyncio
 aiohttp
 retrying
+firebase-admin

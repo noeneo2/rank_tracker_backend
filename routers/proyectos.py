@@ -3,6 +3,7 @@ from db.models.proyecto import Proyecto, TaskRequest
 from db.models.audit_seo import AuditSEOCreateRequest, AuditSEOProject
 from db.models.proyectoBench import ProyectoBench
 from db import dataforseoClient
+from db.firestore_client import get_projects_collection, get_users_collection
 import os
 from google.cloud import bigquery
 from pytz import timezone
@@ -155,37 +156,32 @@ def listarProyectosAngularBench(username: str):
     except:
         return {'message':'error'}
 
+
 @router.post('/ejecutar_proyecto/', status_code=status.HTTP_202_ACCEPTED)
 async def ejecutarProyectoManual(project_id: str, background_tasks: BackgroundTasks):
     try:
         print(project_id)
-        sql = f"""
-        SELECT 
-            nombre_proyecto, 
-            dominio_princpal, 
-            subdomain_enabled, 
-            idioma, 
-            coordenadas, 
-            keywords, 
-            competidores, 
-            paid_enabled, 
-            project_id
-        FROM `neo-rank-tracker.rank_tracker_neo.tbl_proyecto` 
-        WHERE project_id = '{project_id}'
-        """
-        query_job = clientbq.query(sql)
-        results = query_job.result()  # Espera a que la consulta se complete y devuelve los resultados
-        # Verificar si hay datos en los resultados usando iteración directa
+        
+        # Get project from Firestore
+        projects_ref = get_projects_collection()
+        doc = projects_ref.document(project_id).get()
+        
+        if not doc.exists:
+            raise HTTPException(status_code=404, detail=f"No se encontró el proyecto: {project_id}")
+
+        row = doc.to_dict()
         nowutc = datetime.now(timezone('GMT'))
         now_peru = nowutc.astimezone(timezone('America/Bogota'))
         fecha_funcion = now_peru.strftime(fmt)
-        # Obtiene un solo proyecto
-        row = next(iter(results), None)
-        if not row:
-            raise HTTPException(status_code=404, detail=f"No se encontró el proyecto: {project_id}")
 
-        keywords = json.loads(row['keywords']) if isinstance(row['keywords'], str) else row['keywords']
-        competidores = json.loads(row['competidores']) if isinstance(row['competidores'], str) else row['competidores']
+        keywords = row.get('keywords', [])
+        competidores = row.get('competidores', [])
+        
+        # Ensure keywords/competidores are lists (they should be in Firestore)
+        if isinstance(keywords, str):
+            keywords = json.loads(keywords)
+        if isinstance(competidores, str):
+            competidores = json.loads(competidores)
 
         proyecto = {
             "nombre_proyecto": row["nombre_proyecto"],
@@ -219,38 +215,31 @@ async def ejecutarProyectoManual(project_id: str, background_tasks: BackgroundTa
         raise HTTPException(status_code=500, detail=f"Ha ocurrido un error: {error}")
 
 
+
+
 @router.get('/keywords_disponible/',status_code=status.HTTP_202_ACCEPTED)
 async def keywordsDisponibles(username: str):
     print(username)
     try:
-        keywords_count_query = f"""
-                        WITH Keywords AS (
-                        SELECT
-                            user_owner,
-                            estado,
-                            JSON_EXTRACT_SCALAR(keyword_data, '$[0]') AS keyword
-                        FROM
-                            `neo-rank-tracker.rank_tracker_neo.tbl_proyecto`,
-                            UNNEST(JSON_EXTRACT_ARRAY(keywords)) AS keyword_data
-                        )
-                        SELECT
-                        COUNT(keyword) AS keyword_count
-                        FROM
-                        Keywords
-                        WHERE
-                        user_owner = '{username}' and estado = 1
-        """
         keyword_count_user = 0
         keyword_count_total = 0
         
-        df1 = clientbq.query(keywords_count_query).to_dataframe()
-        if not df1.empty:
-            keyword_count_user = int(df1['keyword_count'].iloc[0])
-            
-        keywords_available_query = f"SELECT keywords_count FROM `neo-rank-tracker.rank_tracker_neo.tbl_usuarios` where username = '{username}';"
-        df2 = clientbq.query(keywords_available_query).to_dataframe()
-        if not df2.empty:
-            keyword_count_total = int(df2['keywords_count'].iloc[0])
+        # Get user's keywords count from Firestore projects
+        projects_ref = get_projects_collection()
+        query = projects_ref.where('user_owner', '==', username).where('estado', '==', 1)
+        docs = query.stream()
+        
+        for doc in docs:
+            data = doc.to_dict()
+            keywords = data.get('keywords', [])
+            keyword_count_user += len(keywords)
+        
+        # Get user's total allowed keywords from Firestore users
+        users_ref = get_users_collection()
+        user_doc = users_ref.document(username).get()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            keyword_count_total = user_data.get('keywords_count', 0)
         
         keywords_disponibles = int(keyword_count_total) - int(keyword_count_user)
         print(keywords_disponibles)
@@ -262,40 +251,31 @@ async def keywordsDisponibles(username: str):
 async def crearProyecto(proyecto: Proyecto, background_tasks: BackgroundTasks):
     try:
         print(f'--->> CREACION DE PROYECTO INICIADO <<---')
-        dataset_id = 'rank_tracker_neo'
-        table_id = 'tbl_proyecto'
-        table_ref = clientbq.dataset(dataset_id).table(table_id)
-        table = clientbq.get_table(table_ref)
         nowutc = datetime.now(timezone('GMT'))
         now_peru = nowutc.astimezone(timezone('America/Bogota'))
         fecha_funcion = now_peru.strftime(fmt)
         keyword_count_total = 0
         keyword_count_user = 0
+        
         print(f'--->> VALIDANDO LA CANTIDAD DE KEYWORDS DISPONIBLES <<---')
-        keywords_count_query = f"""
-                        WITH Keywords AS (
-                        SELECT
-                            user_owner,
-                            estado,
-                            JSON_EXTRACT_SCALAR(keyword_data, '$[0]') AS keyword
-                        FROM
-                            `neo-rank-tracker.rank_tracker_neo.tbl_proyecto`,
-                            UNNEST(JSON_EXTRACT_ARRAY(keywords)) AS keyword_data
-                        )
-                        SELECT
-                        COUNT(keyword) AS keyword_count
-                        FROM
-                        Keywords
-                        WHERE
-                        user_owner = '{proyecto.usuario}' and estado = 1
-        """
-        df1 = clientbq.query(keywords_count_query).to_dataframe()
-        for ind in df1.index:
-            keyword_count_user = int(df1['keyword_count'][ind])
-        keywords_available_query = f"SELECT keywords_count FROM `neo-rank-tracker.rank_tracker_neo.tbl_usuarios` where username = '{proyecto.usuario}';"
-        df2 = clientbq.query(keywords_available_query).to_dataframe()
-        for ind in df2.index:
-            keyword_count_total = int(df2['keywords_count'][ind])
+        
+        # Get user's keywords count from Firestore projects
+        projects_ref = get_projects_collection()
+        query = projects_ref.where('user_owner', '==', proyecto.usuario).where('estado', '==', 1)
+        docs = query.stream()
+        
+        for doc in docs:
+            data = doc.to_dict()
+            keywords = data.get('keywords', [])
+            keyword_count_user += len(keywords)
+        
+        # Get user's total allowed keywords from Firestore users
+        users_ref = get_users_collection()
+        user_doc = users_ref.document(proyecto.usuario).get()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            keyword_count_total = user_data.get('keywords_count', 0)
+        
         keywords_availables = keyword_count_total - keyword_count_user
         if((keywords_availables) <= 0):
             return {
@@ -313,32 +293,29 @@ async def crearProyecto(proyecto: Proyecto, background_tasks: BackgroundTasks):
                 }
             else:
                 print(f"Puede crear proyecto: {keywords_availables-len(proyecto.keywords)}")
-                query = """
-                        INSERT INTO `neo-rank-tracker.rank_tracker_neo.tbl_proyecto`
-                        (nombre_proyecto, dominio_princpal, subdomain_enabled, idioma, pais, keywords, competidores, fecha_creaciones, estado, coordenadas, paid_enabled, user_owner, project_id)
-                        VALUES (@nombre_proyecto, @dominio_princpal, @subdomain_enabled, @idioma, @pais, @keywords, @competidores, @fecha_creaciones, @estado, @coordenadas, @paid_enabled, @user_owner, @project_id);
-                        """
-                job_config = bigquery.QueryJobConfig(
-                    query_parameters=[
-                        bigquery.ScalarQueryParameter("nombre_proyecto", "STRING", proyecto.nombre_proyecto),
-                        bigquery.ScalarQueryParameter("dominio_princpal", "STRING", proyecto.dominio_princpal),
-                        bigquery.ScalarQueryParameter("subdomain_enabled", "BOOL",  bool(proyecto.subdomain_enabled)),
-                        bigquery.ScalarQueryParameter("idioma", "STRING", proyecto.idioma),
-                        bigquery.ScalarQueryParameter("pais", "STRING", proyecto.pais),
-                        bigquery.ScalarQueryParameter("keywords", "JSON", json.dumps(proyecto.keywords)),
-                        bigquery.ScalarQueryParameter("competidores", "JSON", json.dumps(proyecto.competidores)),
-                        bigquery.ScalarQueryParameter("fecha_creaciones", "STRING", fecha_funcion),
-                        bigquery.ScalarQueryParameter("estado", "INTEGER", proyecto.estado),
-                        bigquery.ScalarQueryParameter("coordenadas", "STRING", proyecto.coordenadas),
-                        bigquery.ScalarQueryParameter("paid_enabled", "BOOL",  bool(proyecto.paid_enabled)),
-                        bigquery.ScalarQueryParameter("user_owner", "STRING", proyecto.usuario),
-                        bigquery.ScalarQueryParameter("project_id", "STRING", proyecto.project_id)
-                    ]
-                )
-                print(f"Parámetros de inserción BigQuery: {job_config.query_parameters}") # Nuevo: Imprime parámetros
-                query_job = clientbq.query(query, job_config=job_config)
-                query_job.result() # Esperar a que la inserción se complete
-                print("Inserción en tbl_proyecto completada exitosamente.")
+                
+                # Insert project into Firestore
+                project_data = {
+                    "nombre_proyecto": proyecto.nombre_proyecto,
+                    "dominio_princpal": proyecto.dominio_princpal,
+                    "subdomain_enabled": bool(proyecto.subdomain_enabled),
+                    "idioma": proyecto.idioma,
+                    "pais": proyecto.pais,
+                    "keywords": proyecto.keywords,
+                    "competidores": proyecto.competidores,
+                    "fecha_creaciones": fecha_funcion,
+                    "estado": proyecto.estado,
+                    "coordenadas": proyecto.coordenadas,
+                    "paid_enabled": bool(proyecto.paid_enabled),
+                    "user_owner": proyecto.usuario,
+                    "project_id": proyecto.project_id
+                }
+                
+                projects_ref = get_projects_collection()
+                doc_ref = projects_ref.document(proyecto.project_id)
+                doc_ref.set(project_data)
+                print("Inserción en Firestore completada exitosamente.")
+                
                 background_tasks.add_task(crearFirstProyect, proyecto.nombre_proyecto, proyecto.dominio_princpal, bool(proyecto.subdomain_enabled), proyecto.idioma, proyecto.keywords, proyecto.competidores, fecha_funcion, proyecto.coordenadas, proyecto.paid_enabled, proyecto.project_id)
                 return {
                     "status": "success",
@@ -346,47 +323,40 @@ async def crearProyecto(proyecto: Proyecto, background_tasks: BackgroundTasks):
                     "message": "Proyecto creado exitosamente."
                 }
     except Exception as e:
-        print(f"ERROR: Ha ocurrido un error al crear el proyecto en el backend: {e}") # Más específico
-        traceback.print_exc() # Nuevo: Imprime el stack trace completo para depuración
+        print(f"ERROR: Ha ocurrido un error al crear el proyecto en el backend: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=400, detail=f"Error interno del servidor: {e}")
 
 @router.post('/actualizar/',status_code=status.HTTP_202_ACCEPTED)
 async def actualizarProyecto(proyecto: Proyecto):
     try:
-        dataset_id = 'rank_tracker_neo'
-        table_id = 'tbl_proyecto'
-        table_ref = clientbq.dataset(dataset_id).table(table_id)
-        table = clientbq.get_table(table_ref)
         nowutc = datetime.now(timezone('GMT'))
         now_peru = nowutc.astimezone(timezone('America/Bogota'))
         fecha_funcion = now_peru.strftime(fmt)
         keyword_count_total = 0
         keyword_count_user = 0
+        
         print(f'--->> VALIDANDO LA CANTIDAD DE KEYWORDS DISPONIBLES <<---')
-        keywords_count_query = f"""
-                        WITH Keywords AS (
-                        SELECT
-                            user_owner,
-                            estado,
-                            JSON_EXTRACT_SCALAR(keyword_data, '$[0]') AS keyword
-                        FROM
-                            `neo-rank-tracker.rank_tracker_neo.tbl_proyecto`,
-                            UNNEST(JSON_EXTRACT_ARRAY(keywords)) AS keyword_data
-                        )
-                        SELECT
-                        COUNT(keyword) AS keyword_count
-                        FROM
-                        Keywords
-                        WHERE
-                        user_owner = '{proyecto.usuario}' and estado = 1
-        """
-        df1 = clientbq.query(keywords_count_query).to_dataframe()
-        for ind in df1.index:
-            keyword_count_user = int(df1['keyword_count'][ind])
-        keywords_available_query = f"SELECT keywords_count FROM `neo-rank-tracker.rank_tracker_neo.tbl_usuarios` where username = '{proyecto.usuario}';"
-        df2 = clientbq.query(keywords_available_query).to_dataframe()
-        for ind in df2.index:
-            keyword_count_total = int(df2['keywords_count'][ind])
+        
+        # Get user's keywords count from Firestore projects (excluding current project)
+        projects_ref = get_projects_collection()
+        query = projects_ref.where('user_owner', '==', proyecto.usuario).where('estado', '==', 1)
+        docs = query.stream()
+        
+        for doc in docs:
+            data = doc.to_dict()
+            # Exclude current project from count
+            if data.get('project_id') != proyecto.project_id:
+                keywords = data.get('keywords', [])
+                keyword_count_user += len(keywords)
+        
+        # Get user's total allowed keywords from Firestore users
+        users_ref = get_users_collection()
+        user_doc = users_ref.document(proyecto.usuario).get()
+        if user_doc.exists:
+            user_data = user_doc.to_dict()
+            keyword_count_total = user_data.get('keywords_count', 0)
+        
         keywords_availables = keyword_count_total - keyword_count_user
         if((keywords_availables) <= 0):
             return {
@@ -396,25 +366,41 @@ async def actualizarProyecto(proyecto: Proyecto):
             }
         else:
             if (keywords_availables - len(proyecto.keywords) <= 0):
-                print(f"No puede crear proyecto: {len(proyecto.keywords) - keywords_availables}")
+                print(f"No puede actualizar proyecto: {len(proyecto.keywords) - keywords_availables}")
                 return {
                 "status": "error",
                 "code": "NO_KEYWORDS_AVAILABLE",
                 "message": "No tienes suficientes keywords disponibles para actualizar su proyecto."
                 }
             else:
-                print(f"Puede crear proyecto: {len(proyecto.keywords) - keywords_availables}")
-                query = f"UPDATE `neo-rank-tracker.rank_tracker_neo.tbl_proyecto` SET estado = {proyecto.estado}, dominio_princpal = '{proyecto.dominio_princpal}', subdomain_enabled = {bool(proyecto.subdomain_enabled)}, idioma = '{proyecto.idioma}', pais = '{proyecto.pais}', keywords = SAFE.PARSE_JSON('{json.dumps(proyecto.keywords)}'), competidores = SAFE.PARSE_JSON('{json.dumps(proyecto.competidores)}'), coordenadas = '{proyecto.coordenadas}', paid_enabled = {bool(proyecto.paid_enabled)} WHERE nombre_proyecto = '{proyecto.nombre_proyecto}'"
-                # Ejecuta la consulta
-                query_job = clientbq.query(query)
-                # Espera a que la consulta se complete
-                query_job.result()
+                print(f"Puede actualizar proyecto: {len(proyecto.keywords) - keywords_availables}")
+                
+                # Update project in Firestore
+                projects_ref = get_projects_collection()
+                # Find project by nombre_proyecto
+                query = projects_ref.where('nombre_proyecto', '==', proyecto.nombre_proyecto).limit(1)
+                docs = list(query.stream())
+                
+                if docs:
+                    doc_ref = docs[0].reference
+                    doc_ref.update({
+                        "estado": proyecto.estado,
+                        "dominio_princpal": proyecto.dominio_princpal,
+                        "subdomain_enabled": bool(proyecto.subdomain_enabled),
+                        "idioma": proyecto.idioma,
+                        "pais": proyecto.pais,
+                        "keywords": proyecto.keywords,
+                        "competidores": proyecto.competidores,
+                        "coordenadas": proyecto.coordenadas,
+                        "paid_enabled": bool(proyecto.paid_enabled)
+                    })
+                
                 return {
                     "status": "success",
                     "code": "PROJECT_UPDATED",
                     "message": "Proyecto actualizado exitosamente."
                 }
-    except GoogleAPIError as e:
+    except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get('/obtener/')
@@ -450,30 +436,44 @@ def getBenchSEO(id: str, tag: str):
 def updateProyecto(proyecto: Proyecto):
     print(proyecto.competidores)
     try:
-        query = f"UPDATE `neo-rank-tracker.rank_tracker_neo.tbl_proyecto` SET estado = {proyecto.estado}, dominio_princpal = '{proyecto.dominio_princpal}', subdomain_enabled = {bool(proyecto.subdomain_enabled)}, idioma = '{proyecto.idioma}', pais = '{proyecto.pais}', competidores = SAFE.PARSE_JSON('{json.dumps(proyecto.competidores)}'), coordenadas = '{proyecto.coordenadas}', paid_enabled = {bool(proyecto.paid_enabled)} WHERE nombre_proyecto = '{proyecto.nombre_proyecto}'"
-        # Ejecuta la consulta
-        query_job = clientbq.query(query)
-        # Espera a que la consulta se complete
-        query_job.result()
+        # Update project in Firestore
+        projects_ref = get_projects_collection()
+        # Find project by nombre_proyecto
+        query = projects_ref.where('nombre_proyecto', '==', proyecto.nombre_proyecto).limit(1)
+        docs = list(query.stream())
+        
+        if docs:
+            doc_ref = docs[0].reference
+            doc_ref.update({
+                "estado": proyecto.estado,
+                "dominio_princpal": proyecto.dominio_princpal,
+                "subdomain_enabled": bool(proyecto.subdomain_enabled),
+                "idioma": proyecto.idioma,
+                "pais": proyecto.pais,
+                "competidores": proyecto.competidores,
+                "coordenadas": proyecto.coordenadas,
+                "paid_enabled": bool(proyecto.paid_enabled)
+            })
+        
         return {
                     "status": "success",
                     "code": "PROJECT_UPDATED",
                     "message": "Proyecto actualizado exitosamente."
                 }
-    except GoogleAPIError as e:
+    except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
 @router.get('/listar_proyectos/')
 def listarProyectos():
     try:
-        sql = "SELECT nombre_proyecto FROM `neo-rank-tracker.rank_tracker_neo.tbl_proyecto` where estado = 1"
-        df = clientbq.query(sql).to_dataframe()
-        datajson = {"items":[]}
-        for ind in df.index:
-            nombre_proyecto = df['nombre_proyecto'][ind]
-            item = {"nombre_proyecto":nombre_proyecto}
-            datajson["items"].append(item)
-        proyectos = datajson['items']
+        projects_ref = get_projects_collection()
+        query = projects_ref.where('estado', '==', 1)
+        docs = query.stream()
+        
+        proyectos = []
+        for doc in docs:
+            data = doc.to_dict()
+            proyectos.append({"nombre_proyecto": data.get("nombre_proyecto")})
         return proyectos
     except:
         return {'message':'error'}
@@ -482,18 +482,19 @@ def listarProyectos():
 def listarProyectosAngular(username: str):
     print(username)
     try:
-        sql = f"SELECT nombre_proyecto, dominio_princpal, pais, estado FROM `neo-rank-tracker.rank_tracker_neo.tbl_proyecto` where user_owner = '{username}'"
-        print(sql)
-        df = clientbq.query(sql).to_dataframe()
-        datajson = {"items":[]}
-        for ind in df.index:
-            nombre_proyecto = df['nombre_proyecto'][ind]
-            dominio_principal = df['dominio_princpal'][ind]
-            estado = int(df['estado'][ind])
-            pais = df['pais'][ind]
-            item = {"nombre_proyecto":nombre_proyecto, "dominio_principal":dominio_principal, "pais":pais, "estado": estado}
-            datajson["items"].append(item)
-        proyectos = datajson['items']
+        projects_ref = get_projects_collection()
+        query = projects_ref.where('user_owner', '==', username)
+        docs = query.stream()
+        
+        proyectos = []
+        for doc in docs:
+            data = doc.to_dict()
+            proyectos.append({
+                "nombre_proyecto": data.get("nombre_proyecto"),
+                "dominio_principal": data.get("dominio_princpal"),
+                "pais": data.get("pais"),
+                "estado": data.get("estado")
+            })
         return proyectos
     except:
         return {'message':'error'}
@@ -502,17 +503,18 @@ def listarProyectosAngular(username: str):
 def listarProyectosAngularDesactivados(username: str):
     print(username)
     try:
-        sql = f"SELECT nombre_proyecto, dominio_princpal, pais FROM `neo-rank-tracker.rank_tracker_neo.tbl_proyecto` where estado = 0 and user_owner = '{username}'"
-        print(sql)
-        df = clientbq.query(sql).to_dataframe()
-        datajson = {"items":[]}
-        for ind in df.index:
-            nombre_proyecto = df['nombre_proyecto'][ind]
-            dominio_principal = df['dominio_princpal'][ind]
-            pais = df['pais'][ind]
-            item = {"nombre_proyecto":nombre_proyecto, "dominio_principal":dominio_principal, "pais":pais }
-            datajson["items"].append(item)
-        proyectos = datajson['items']
+        projects_ref = get_projects_collection()
+        query = projects_ref.where('user_owner', '==', username).where('estado', '==', 0)
+        docs = query.stream()
+        
+        proyectos = []
+        for doc in docs:
+            data = doc.to_dict()
+            proyectos.append({
+                "nombre_proyecto": data.get("nombre_proyecto"),
+                "dominio_principal": data.get("dominio_princpal"),
+                "pais": data.get("pais")
+            })
         return proyectos
     except:
         return {'message':'error'}
@@ -521,14 +523,15 @@ def listarProyectosAngularDesactivados(username: str):
 def listarProyectosUser(username: str):
     nombreU = urllib.parse.unquote(username)
     try:
-        sql = f"SELECT nombre_proyecto FROM `neo-rank-tracker.rank_tracker_neo.tbl_proyecto` where user_owner = '{nombreU}'"
-        df = clientbq.query(sql).to_dataframe()
-        datajson = {"items":[]}
-        for ind in df.index:
-            nombre_proyecto = df['nombre_proyecto'][ind]
-            item = {"nombre_proyecto":nombre_proyecto}
-            datajson["items"].append(item)
-        proyectos = datajson['items']
+        projects_ref = get_projects_collection()
+        query = projects_ref.where('user_owner', '==', nombreU)
+        docs = query.stream()
+        
+        proyectos = []
+        for doc in docs:
+            data = doc.to_dict()
+            proyectos.append({"nombre_proyecto": data.get("nombre_proyecto")})
+        return proyectos
         return proyectos
     except:
         return {'message':'error'}
@@ -550,15 +553,15 @@ def listarProyectosDesactivados():
 
 @router.get('/grafico_historico/')
 def detalleHistorico(idProyect: str, dominio: str, fecha_inicio: date, fecha_fin: date):
-    start_date = fecha_inicio.strftime('%Y-%m-%d')
-    end_date = fecha_fin.strftime('%Y-%m-%d')
+    # Ensure dates are in YYYY-MM-DD string format or DATE objects if BQ library supports it
+    # tbl_dashboard_cache.fecha is DATE type
     query = """
     SELECT 
         fecha,
         rango_grupo,
-        COUNT(DISTINCT keyword) as cantidad_keywords
+        SUM(cantidad_keywords) as cantidad_keywords
     FROM 
-        `neo-rank-tracker.rank_tracker_neo.tbl_keywords_organic_final`
+        `neo-rank-tracker.rank_tracker_neo.tbl_dashboard_cache`
     WHERE
         id_proyecto = @idproyect AND dominio = @dominio AND tipo_resultado = 'organic' AND fecha BETWEEN @fecha_inicio AND @fecha_fin
     GROUP BY 
@@ -573,14 +576,15 @@ def detalleHistorico(idProyect: str, dominio: str, fecha_inicio: date, fecha_fin
         query_parameters=[
             bigquery.ScalarQueryParameter("idproyect", "STRING", idProyect),
             bigquery.ScalarQueryParameter("dominio", "STRING", dominio),
-            bigquery.ScalarQueryParameter("fecha_inicio", "STRING", start_date),
-            bigquery.ScalarQueryParameter("fecha_fin", "STRING", end_date)
+            bigquery.ScalarQueryParameter("fecha_inicio", "DATE", fecha_inicio),
+            bigquery.ScalarQueryParameter("fecha_fin", "DATE", fecha_fin)
         ]
     )
     results = clientbq.query(query, job_config=job_config).result()
     response_format = {}
     for row in results:
-        date_str = row.fecha
+        # Convert date to string for JSON response
+        date_str = row.fecha.strftime('%Y-%m-%d')
         if date_str not in response_format:
             response_format[date_str] = {}
         response_format[date_str][row.rango_grupo] = row.cantidad_keywords
@@ -588,16 +592,15 @@ def detalleHistorico(idProyect: str, dominio: str, fecha_inicio: date, fecha_fin
 
 @router.get('/grafico_competidores/')
 def resultadosCompetidores(idProyect: str, fecha_inicio: date, fecha_fin: date):
-    start_date = fecha_inicio.strftime('%Y-%m-%d')
-    end_date = fecha_fin.strftime('%Y-%m-%d')
+    # Ensure dates are in YYYY-MM-DD string format or DATE objects if BQ library supports it
     query = """
     SELECT
         fecha,
         dominio,
         rango_grupo,
-        COUNT(keyword) as cantidad_keywords
+        SUM(cantidad_keywords) as cantidad_keywords
     FROM 
-        `neo-rank-tracker.rank_tracker_neo.tbl_keywords_organic_final`
+        `neo-rank-tracker.rank_tracker_neo.tbl_dashboard_cache`
     WHERE
         id_proyecto = @idproyect AND tipo_resultado = 'organic' AND fecha BETWEEN @fecha_inicio AND @fecha_fin
     GROUP BY 
@@ -613,18 +616,19 @@ def resultadosCompetidores(idProyect: str, fecha_inicio: date, fecha_fin: date):
     job_config = bigquery.QueryJobConfig(
         query_parameters=[
             bigquery.ScalarQueryParameter("idproyect", "STRING", idProyect),
-            bigquery.ScalarQueryParameter("fecha_inicio", "STRING", start_date),
-            bigquery.ScalarQueryParameter("fecha_fin", "STRING", end_date)
+            bigquery.ScalarQueryParameter("fecha_inicio", "DATE", fecha_inicio),
+            bigquery.ScalarQueryParameter("fecha_fin", "DATE", fecha_fin)
         ]
     )
     results = clientbq.query(query, job_config=job_config).result()
     formatted_result = {}
 
     for row in results:
-        fecha = row['fecha']
-        dominio = row['dominio']
-        rango_grupo = row['rango_grupo']
-        cantidad_keywords = row['cantidad_keywords']
+        # Access via attribute and convert date
+        fecha = row.fecha.strftime('%Y-%m-%d')
+        dominio = row.dominio
+        rango_grupo = row.rango_grupo
+        cantidad_keywords = row.cantidad_keywords
 
         if fecha not in formatted_result:
             formatted_result[fecha] = {}
@@ -640,15 +644,41 @@ def detalleProyecto(nombreP: str):
     nombreP = urllib.parse.unquote(nombreP)
     print(nombreP)
     try:
-        sql = f"SELECT dominio, rango_grupo, COUNT(DISTINCT keyword) AS cantidad_keywords FROM `neo-rank-tracker.rank_tracker_neo.tbl_keywords_organic_final` WHERE fecha >= FORMAT_DATE('%Y-%m-%d', DATE_SUB(CURRENT_DATE('America/Bogota'), INTERVAL 7 DAY)) and id_proyecto = '{nombreP}' and tipo_resultado = 'organic' and not url = 'no posiciona' GROUP BY dominio, rango_grupo"
-        df = clientbq.query(sql).to_dataframe()
+        # Optimization: Query tbl_dashboard_cache for the latest available date for this project
+        # This replaces the logic of "last 7 days" aggregation with "latest snapshot"
+        sql = """
+        SELECT 
+            dominio, 
+            rango_grupo, 
+            SUM(cantidad_keywords) AS cantidad_keywords 
+        FROM `neo-rank-tracker.rank_tracker_neo.tbl_dashboard_cache` 
+        WHERE 
+            id_proyecto = @nombreP 
+            AND tipo_resultado = 'organic'
+            AND fecha = (
+                SELECT MAX(fecha) 
+                FROM `neo-rank-tracker.rank_tracker_neo.tbl_dashboard_cache` 
+                WHERE id_proyecto = @nombreP
+            )
+        GROUP BY dominio, rango_grupo
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("nombreP", "STRING", nombreP)
+            ]
+        )
+        
+        results = clientbq.query(sql, job_config=job_config).result()
         datajson = {"items":[]}
-        for ind in df.index:
-            dominio = df['dominio'][ind]
-            rango_grupo = df['rango_grupo'][ind]
-            cantidad_keywords = int(df['cantidad_keywords'][ind])
+        
+        for row in results:
+            dominio = row.dominio
+            rango_grupo = row.rango_grupo
+            cantidad_keywords = int(row.cantidad_keywords)
             item = {"dominio":dominio, "rango_grupo":rango_grupo, "cantidad_keywords":cantidad_keywords}
             datajson["items"].append(item)
+            
         proyectos = datajson['items']
         return proyectos
     except HTTPException as error:
@@ -659,15 +689,41 @@ def detalleProyectoPaid(nombreP: str):
     nombreP = urllib.parse.unquote(nombreP)
     print(nombreP)
     try:
-        sql = f"SELECT dominio, rango_grupo, COUNT(DISTINCT keyword) AS cantidad_keywords FROM `neo-rank-tracker.rank_tracker_neo.tbl_keywords_organic_final` WHERE fecha >= FORMAT_DATE('%Y-%m-%d', DATE_SUB(CURRENT_DATE('America/Bogota'), INTERVAL 7 DAY)) and id_proyecto = '{nombreP}' and tipo_resultado in ('organic', 'paid') and not url = 'no posiciona' GROUP BY dominio, rango_grupo"
-        df = clientbq.query(sql).to_dataframe()
+        # Optimization: Query tbl_dashboard_cache for the latest available date for this project
+        # Includes both 'organic' and 'paid' results
+        sql = """
+        SELECT 
+            dominio, 
+            rango_grupo, 
+            SUM(cantidad_keywords) AS cantidad_keywords 
+        FROM `neo-rank-tracker.rank_tracker_neo.tbl_dashboard_cache` 
+        WHERE 
+            id_proyecto = @nombreP 
+            AND tipo_resultado IN ('organic', 'paid')
+            AND fecha = (
+                SELECT MAX(fecha) 
+                FROM `neo-rank-tracker.rank_tracker_neo.tbl_dashboard_cache` 
+                WHERE id_proyecto = @nombreP
+            )
+        GROUP BY dominio, rango_grupo
+        """
+        
+        job_config = bigquery.QueryJobConfig(
+            query_parameters=[
+                bigquery.ScalarQueryParameter("nombreP", "STRING", nombreP)
+            ]
+        )
+        
+        results = clientbq.query(sql, job_config=job_config).result()
         datajson = {"items":[]}
-        for ind in df.index:
-            dominio = df['dominio'][ind]
-            rango_grupo = df['rango_grupo'][ind]
-            cantidad_keywords = int(df['cantidad_keywords'][ind])
+        
+        for row in results:
+            dominio = row.dominio
+            rango_grupo = row.rango_grupo
+            cantidad_keywords = int(row.cantidad_keywords)
             item = {"dominio":dominio, "rango_grupo":rango_grupo, "cantidad_keywords":cantidad_keywords}
             datajson["items"].append(item)
+            
         proyectos = datajson['items']
         return proyectos
     except HTTPException as error:
@@ -675,54 +731,55 @@ def detalleProyectoPaid(nombreP: str):
 
 @router.get("/descargar_keywords/",status_code=status.HTTP_202_ACCEPTED)
 async def get_project_keywords(nombre_proyecto: str):
-    nombreP = urllib.parse.unquote(nombre_proyecto)
-    print(nombreP)
-    query = f"""
-        SELECT keywords
-        FROM `neo-rank-tracker.rank_tracker_neo.tbl_proyecto`
-        WHERE nombre_proyecto = @nombre_proyecto
-    """
-    job_config = bigquery.QueryJobConfig(
-        query_parameters=[
-            bigquery.ScalarQueryParameter("nombre_proyecto", "STRING", nombreP)
-        ]
-    )
-    query_job = clientbq.query(query, job_config=job_config)
-    result = query_job.result()
-    
-    # Verifica si el proyecto existe y contiene keywords
-    if result.total_rows == 0:
-        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
-    
-    # Extrae las keywords
-    keywords = next(result).keywords
-    return keywords
+    try:
+        nombreP = urllib.parse.unquote(nombre_proyecto)
+        print(nombreP)
+        
+        projects_ref = get_projects_collection()
+        query = projects_ref.where('nombre_proyecto', '==', nombreP).limit(1)
+        docs = list(query.stream())
+        
+        if not docs:
+            raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+        
+        row = docs[0].to_dict()
+        # Ensure keywords are list
+        keywords = row.get('keywords', [])
+        if isinstance(keywords, str):
+            keywords = json.loads(keywords)
+            
+        return keywords
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @router.get('/detalle_proyecto_angular/')
 def detalleProyectoAngular(nombreP: str):
     nombreP = urllib.parse.unquote(nombreP)
     print(nombreP)
     try:
-        sql = f"SELECT nombre_proyecto, dominio_princpal, subdomain_enabled, idioma, pais, competidores, estado, paid_enabled, keywords FROM `neo-rank-tracker.rank_tracker_neo.tbl_proyecto` WHERE nombre_proyecto = '{nombreP}'"
-        df = clientbq.query(sql).to_dataframe()
-        datajson = {"items":[]}
-        for ind in df.index:
-            keywords = df['keywords'][ind]
-            json_keywords = json.loads(keywords)
-            item = {
-                "nombre_proyecto": df['nombre_proyecto'][ind],
-                "dominio_princpal": df['dominio_princpal'][ind],
-                "subdomain_enabled": bool(df['subdomain_enabled'][ind]),
-                "idioma": df['idioma'][ind],
-                "pais": df['pais'][ind],
-                "competidores": df['competidores'][ind],  # Ya es una lista, se usa directamente
-                "keywords": json_keywords,
-                "estado": int(df['estado'][ind]),
-                "paid_enabled": bool(df['paid_enabled'][ind])
-            }
-            datajson["items"].append(item)
-        proyecto = datajson['items']
-        return proyecto[0]
+        # Get project from Firestore
+        projects_ref = get_projects_collection()
+        query = projects_ref.where('nombre_proyecto', '==', nombreP).limit(1)
+        docs = list(query.stream())
+        
+        if not docs:
+            return {'message': 'Proyecto no encontrado'}
+            
+        data = docs[0].to_dict()
+        
+        item = {
+            "nombre_proyecto": data.get("nombre_proyecto"),
+            "dominio_princpal": data.get("dominio_princpal"),
+            "subdomain_enabled": bool(data.get("subdomain_enabled")),
+            "idioma": data.get("idioma"),
+            "pais": data.get("pais"),
+            "competidores": data.get("competidores", []),
+            "keywords": data.get("keywords", []),
+            "estado": int(data.get("estado")),
+            "paid_enabled": bool(data.get("paid_enabled"))
+        }
+
+        return item
     except HTTPException as error:
         return {'message':error}
 
