@@ -504,8 +504,11 @@ def listarProyectosAngular(username: str):
                 "estado": data.get("estado")
             })
         return proyectos
-    except:
-        return {'message':'error'}
+    except Exception as e:
+        import traceback
+        print(f"Error in listarProyectosAngular: {e}")
+        traceback.print_exc()
+        return {'message':'error', 'detail': str(e)}
     
 @router.get('/listar_proyectos_angular_desactivados/')
 def listarProyectosAngularDesactivados(username: str):
