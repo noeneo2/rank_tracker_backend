@@ -28,7 +28,15 @@ router = APIRouter(prefix='/rank_tracker',
                    responses={404:{"message":"No encontrado"}})
 
 client = dataforseoClient.RestClient("accounts@neo.com.pe", "sKFJCQjSl8AKRZg5")
-os.environ['GOOGLE_APPLICATION_CREDENTIALS'] ='routers/neo-rank-tracker-63b755f3c88a.json'
+
+# Use credentials file if available (local dev), otherwise use default service account (Cloud Run)
+creds_file = 'routers/neo-rank-tracker-63b755f3c88a.json'
+if os.path.exists(creds_file):
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = creds_file
+    print("Using local credentials file")
+else:
+    print("Using default Cloud Run service account")
+
 fmt = "%Y-%m-%d"
 clientbq = bigquery.Client()
 
@@ -901,7 +909,7 @@ def crearFirstProyect(nombreP:str, dominioP:str, subdomains: bool, idioma:str, k
             max_crawl_pages = 4,
             search_param = "adtest=on",
             keyword="{}".format(urllib.parse.quote(keyword[0])),
-            pingback_url="https://rank-tracker-tasks-448577132.us-central1.run.app/rank_tracker/obtener/?id=$id&tag=$tag"
+            pingback_url="https://rank-tracker-firestore-448577132.us-central1.run.app/rank_tracker/obtener/?id=$id&tag=$tag"
             )
         response = client.post("/v3/serp/google/organic/task_post", post_data)
         if response["status_code"] == 20000:
@@ -941,7 +949,7 @@ def crearBenchProyect(nombreP:str, idioma:str, pais:str, coordenadas:str, keywor
             tag=urllib.parse.quote(nombreP),
             depth = 20,
             keyword="{}".format(quote(keyword['Keyword'])),
-            pingback_url="https://rank-tracker-tasks-448577132.us-central1.run.app/rank_tracker/obtener-bench-seo/?id=$id&tag=$tag"
+            pingback_url="https://rank-tracker-firestore-448577132.us-central1.run.app/rank_tracker/obtener-bench-seo/?id=$id&tag=$tag"
             )
         response = client.post("/v3/serp/google/organic/task_post", post_data)
         if response["status_code"] == 20000:
