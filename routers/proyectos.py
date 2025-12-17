@@ -302,6 +302,23 @@ async def crearProyecto(proyecto: Proyecto, background_tasks: BackgroundTasks):
             else:
                 print(f"Puede crear proyecto: {keywords_availables-len(proyecto.keywords)}")
                 
+                # Convert nested keyword arrays to objects for Firestore
+                keywords_objects = []
+                for kw in proyecto.keywords:
+                    if isinstance(kw, list) and len(kw) >= 1:
+                        kw_obj = {
+                            "keyword": kw[0] if len(kw) > 0 else "",
+                            "categoria": kw[1] if len(kw) > 1 else "",
+                            "subcategoria": kw[2] if len(kw) > 2 else "",
+                            "intencion": kw[3] if len(kw) > 3 else "",
+                            "volumen": kw[4] if len(kw) > 4 else 0
+                        }
+                        keywords_objects.append(kw_obj)
+                    elif isinstance(kw, dict):
+                        keywords_objects.append(kw)
+                    elif isinstance(kw, str):
+                        keywords_objects.append({"keyword": kw})
+                
                 # Insert project into Firestore
                 project_data = {
                     "nombre_proyecto": proyecto.nombre_proyecto,
@@ -309,7 +326,7 @@ async def crearProyecto(proyecto: Proyecto, background_tasks: BackgroundTasks):
                     "subdomain_enabled": bool(proyecto.subdomain_enabled),
                     "idioma": proyecto.idioma,
                     "pais": proyecto.pais,
-                    "keywords": proyecto.keywords,
+                    "keywords": keywords_objects,
                     "competidores": proyecto.competidores,
                     "fecha_creaciones": fecha_funcion,
                     "estado": proyecto.estado,
@@ -383,6 +400,23 @@ async def actualizarProyecto(proyecto: Proyecto):
             else:
                 print(f"Puede actualizar proyecto: {len(proyecto.keywords) - keywords_availables}")
                 
+                # Convert nested keyword arrays to objects for Firestore
+                keywords_objects = []
+                for kw in proyecto.keywords:
+                    if isinstance(kw, list) and len(kw) >= 1:
+                        kw_obj = {
+                            "keyword": kw[0] if len(kw) > 0 else "",
+                            "categoria": kw[1] if len(kw) > 1 else "",
+                            "subcategoria": kw[2] if len(kw) > 2 else "",
+                            "intencion": kw[3] if len(kw) > 3 else "",
+                            "volumen": kw[4] if len(kw) > 4 else 0
+                        }
+                        keywords_objects.append(kw_obj)
+                    elif isinstance(kw, dict):
+                        keywords_objects.append(kw)
+                    elif isinstance(kw, str):
+                        keywords_objects.append({"keyword": kw})
+                
                 # Update project in Firestore
                 projects_ref = get_projects_collection()
                 # Find project by nombre_proyecto
@@ -397,7 +431,7 @@ async def actualizarProyecto(proyecto: Proyecto):
                         "subdomain_enabled": bool(proyecto.subdomain_enabled),
                         "idioma": proyecto.idioma,
                         "pais": proyecto.pais,
-                        "keywords": proyecto.keywords,
+                        "keywords": keywords_objects,
                         "competidores": proyecto.competidores,
                         "coordenadas": proyecto.coordenadas,
                         "paid_enabled": bool(proyecto.paid_enabled)

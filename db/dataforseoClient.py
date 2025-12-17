@@ -4,8 +4,8 @@ from http.client import HTTPSConnection
 from base64 import b64encode
 
 class RestClient:
-    domain = "api.dataforseo.com"
-    #domain = "sandbox.dataforseo.com"
+    domain = "api.dataforseo.com"  # PRODUCTION - costs money
+    #domain = "sandbox.dataforseo.com"  # SANDBOX - FREE for testing
     def __init__(self, username, password):
         self.username = username
         self.password = password

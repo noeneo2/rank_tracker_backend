@@ -22,17 +22,23 @@ def get_firestore_client():
     if _db is not None:
         return _db
     
-    # Use the same credentials file as BigQuery
+    # Use the same credentials file as BigQuery (for local development)
     cred_path = os.environ.get(
         'GOOGLE_APPLICATION_CREDENTIALS', 
         'routers/neo-rank-tracker-63b755f3c88a.json'
     )
     
     try:
-        cred = credentials.Certificate(cred_path)
-        _firebase_app = firebase_admin.initialize_app(cred)
+        # Check if credentials file exists (local development)
+        if os.path.exists(cred_path):
+            cred = credentials.Certificate(cred_path)
+            _firebase_app = firebase_admin.initialize_app(cred)
+            print("Firestore client initialized with local credentials file")
+        else:
+            # Cloud Run: use Application Default Credentials
+            _firebase_app = firebase_admin.initialize_app()
+            print("Firestore client initialized with Application Default Credentials")
         _db = firestore.client()
-        print("Firestore client initialized successfully")
     except ValueError:
         # App already initialized
         _db = firestore.client()
